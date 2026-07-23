@@ -1,19 +1,19 @@
-# Chapter 11: Mutating Data - Creating Records
+# Chapter 11: Mutating Data (Create, Update, Delete)
 
 ## Overview
 
-This chapter covers how to **create new records** in your database using **React Server Actions** combined with HTML forms. Server Actions allow you to run server-side code securely without building API routes.
+This chapter covers all database mutations using **React Server Actions**: creating new records, updating existing ones, and deleting records. Server Actions allow you to run server-side code securely without building API routes.
 
 ---
 
-## The Problem: Creating Data Without Server Actions
+## Part 1: CREATE - Adding New Records
+
+### The Problem: Creating Data Without Server Actions
 
 Traditional approach (bad):
 
 ```typescript
-// ❌ Need API route
-// POST /api/invoices
-
+// ❌ Need API route (POST /api/invoices)
 // ❌ Form submission to external endpoint
 // ❌ Complex state management
 // ❌ Error handling in client code
@@ -30,9 +30,7 @@ Traditional approach (bad):
 // ✅ Automatic cache revalidation
 ```
 
----
-
-## What Are Server Actions?
+### What Are Server Actions?
 
 **Server Actions** are asynchronous functions that run **only on the server**.
 
@@ -43,11 +41,7 @@ Traditional approach (bad):
 ✅ Can be called from forms with `action` attribute  
 ✅ Work even without JavaScript  
 
----
-
-## Step 1: Create a Route for the Form
-
-Create a page that displays a form for creating new invoices.
+### CREATE: Step 1 - Create a Route for the Form
 
 **File:** `/app/dashboard/invoices/create/page.tsx`
 
@@ -78,16 +72,9 @@ export default async function Page() {
 }
 ```
 
-**What this does:**
-1. Fetches available customers from database
-2. Renders breadcrumb navigation
-3. Passes customers to form component
+### CREATE: Step 2 - Create Server Actions
 
----
-
-## Step 2: Create a Server Action
-
-Define a Server Action that handles form submission and creates the record.
+Define Server Actions for all operations in one file.
 
 **File:** `/app/lib/actions.ts`
 
@@ -101,7 +88,7 @@ import postgres from 'postgres';
 
 const sql = postgres(process.env.POSTGRES_URL!, { ssl: 'require' });
 
-// Define form schema for validation
+// Form validation schema
 const FormSchema = z.object({
   id: z.string(),
   customerId: z.string({
@@ -116,9 +103,15 @@ const FormSchema = z.object({
   date: z.string(),
 });
 
-// Create schema without auto-generated fields
+// For CREATE: omit auto-generated fields
 const CreateInvoice = FormSchema.omit({ id: true, date: true });
 
+// For UPDATE: omit auto-generated fields
+const UpdateInvoice = FormSchema.omit({ id: true, date: true });
+
+// ============================================================
+// CREATE INVOICE
+// ============================================================
 export async function createInvoice(formData: FormData) {
   // Validate form data
   const { customerId, amount, status } = CreateInvoice.parse({
@@ -127,14 +120,13 @@ export async function createInvoice(formData: FormData) {
     status: formData.get('status'),
   });
 
-  // Convert amount to cents for database storage
+  // Convert amount to cents
   const amountInCents = amount * 100;
 
   // Create date in YYYY-MM-DD format
   const date = new Date().toISOString().split('T')[0];
 
   try {
-    // Insert into database
     await sql`
       INSERT INTO invoices (customer_id, amount, status, date)
       VALUES (${customerId}, ${amountInCents}, ${status}, ${date})
@@ -144,27 +136,58 @@ export async function createInvoice(formData: FormData) {
     throw new Error('Failed to create invoice.');
   }
 
-  // Clear cache for invoices page
+  // Clear cache and redirect
   revalidatePath('/dashboard/invoices');
-
-  // Redirect user back to invoices list
   redirect('/dashboard/invoices');
+}
+
+// ============================================================
+// UPDATE INVOICE
+// ============================================================
+export async function updateInvoice(id: string, formData: FormData) {
+  // Validate form data
+  const { customerId, amount, status } = UpdateInvoice.parse({
+    customerId: formData.get('customerId'),
+    amount: formData.get('amount'),
+    status: formData.get('status'),
+  });
+
+  // Convert amount to cents
+  const amountInCents = amount * 100;
+
+  try {
+    await sql`
+      UPDATE invoices
+      SET customer_id = ${customerId}, amount = ${amountInCents}, status = ${status}
+      WHERE id = ${id}
+    `;
+  } catch (error) {
+    console.error('Database Error:', error);
+    throw new Error('Failed to update invoice.');
+  }
+
+  // Clear cache and redirect
+  revalidatePath('/dashboard/invoices');
+  redirect('/dashboard/invoices');
+}
+
+// ============================================================
+// DELETE INVOICE
+// ============================================================
+export async function deleteInvoice(id: string) {
+  try {
+    await sql`DELETE FROM invoices WHERE id = ${id}`;
+  } catch (error) {
+    console.error('Database Error:', error);
+    throw new Error('Failed to delete invoice.');
+  }
+
+  // Clear cache (no redirect - user stays on page)
+  revalidatePath('/dashboard/invoices');
 }
 ```
 
-### What This Does
-
-1. **Validates Input** - Zod schema checks all required fields
-2. **Transforms Data** - Converts amounts to cents, generates date
-3. **Inserts into Database** - Uses SQL to create new record
-4. **Clears Cache** - `revalidatePath()` refreshes the page data
-5. **Redirects User** - Takes them back to the list
-
----
-
-## Step 3: Create the Form Component
-
-Create a form that connects to the Server Action.
+### CREATE: Step 3 - Create the Form Component
 
 **File:** `/app/ui/invoices/create-form.tsx`
 
@@ -268,191 +291,433 @@ export default function Form({
 }
 ```
 
+---
+
+## Part 2: UPDATE - Modifying Existing Records
+
+### UPDATE: Step 1 - Create Edit Route
+
+**File Structure:**
+```
+/invoices
+  /[id]
+    /edit
+      page.tsx
+```
+
+**File:** `/app/dashboard/invoices/[id]/edit/page.tsx`
+
+```typescript
+import Form from '@/app/ui/invoices/edit-form';
+import Breadcrumbs from '@/app/ui/invoices/breadcrumbs';
+import { fetchInvoiceById, fetchCustomers } from '@/app/lib/data';
+
+export default async function Page(props: {
+  params: Promise<{ id: string }>;
+}) {
+  const params = await props.params;
+  const id = params.id;
+
+  // Fetch both in parallel
+  const [invoice, customers] = await Promise.all([
+    fetchInvoiceById(id),
+    fetchCustomers(),
+  ]);
+
+  return (
+    <main>
+      <Breadcrumbs
+        breadcrumbs={[
+          { label: 'Invoices', href: '/dashboard/invoices' },
+          {
+            label: 'Edit Invoice',
+            href: `/dashboard/invoices/${id}/edit`,
+            active: true,
+          },
+        ]}
+      />
+      <Form invoice={invoice} customers={customers} />
+    </main>
+  );
+}
+```
+
+### UPDATE: Step 2 - Create Edit Form
+
+**File:** `/app/ui/invoices/edit-form.tsx`
+
+```typescript
+'use client';
+
+import Link from 'next/link';
+import { Button } from '@/app/ui/button';
+import { updateInvoice } from '@/app/lib/actions';
+
+export default function EditInvoiceForm({
+  invoice,
+  customers,
+}: {
+  invoice: InvoiceForm;
+  customers: CustomerField[];
+}) {
+  // Use .bind() to pass invoice ID without exposing it in HTML
+  const updateInvoiceWithId = updateInvoice.bind(null, invoice.id);
+
+  return (
+    <form action={updateInvoiceWithId}>
+      <div className="space-y-4">
+        {/* Customer Selection - pre-populated */}
+        <div>
+          <label htmlFor="customerId" className="block text-sm font-medium">
+            Choose customer
+          </label>
+          <select
+            id="customerId"
+            name="customerId"
+            defaultValue={invoice.customer_id}
+            className="block w-full rounded-md border px-3 py-2"
+            required
+          >
+            <option value="">Select a customer</option>
+            {customers.map((customer) => (
+              <option key={customer.id} value={customer.id}>
+                {customer.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Amount - pre-populated */}
+        <div>
+          <label htmlFor="amount" className="block text-sm font-medium">
+            Enter amount
+          </label>
+          <input
+            id="amount"
+            name="amount"
+            type="number"
+            placeholder="Enter USD amount"
+            step="0.01"
+            defaultValue={invoice.amount}
+            className="block w-full rounded-md border px-3 py-2"
+            required
+          />
+        </div>
+
+        {/* Status - pre-populated */}
+        <fieldset>
+          <legend className="block text-sm font-medium">Set the invoice status</legend>
+          <div className="mt-2 space-y-2">
+            <div className="flex items-center">
+              <input
+                id="pending"
+                name="status"
+                type="radio"
+                value="pending"
+                defaultChecked={invoice.status === 'pending'}
+                className="mr-2"
+                required
+              />
+              <label htmlFor="pending" className="text-sm">
+                Pending
+              </label>
+            </div>
+            <div className="flex items-center">
+              <input
+                id="paid"
+                name="status"
+                type="radio"
+                value="paid"
+                defaultChecked={invoice.status === 'paid'}
+                className="mr-2"
+                required
+              />
+              <label htmlFor="paid" className="text-sm">
+                Paid
+              </label>
+            </div>
+          </div>
+        </fieldset>
+      </div>
+
+      {/* Form Actions */}
+      <div className="mt-6 flex justify-end gap-4">
+        <Link
+          href="/dashboard/invoices"
+          className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-md"
+        >
+          Cancel
+        </Link>
+        <Button type="submit">Update Invoice</Button>
+      </div>
+    </form>
+  );
+}
+```
+
+### Why Use `.bind()` for IDs?
+
+```typescript
+// ❌ Bad - ID exposed in HTML source
+<input type="hidden" name="id" value={invoice.id} />
+
+// ✅ Good - ID stays on server, encrypted
+const updateInvoiceWithId = updateInvoice.bind(null, invoice.id);
+```
+
+**Benefits:**
+- ID never appears in HTML
+- Cannot be intercepted in network requests
+- Encrypted in closures
+- More secure
+
+---
+
+## Part 3: DELETE - Removing Records
+
+### DELETE: Step 1 - Create Delete Button Component
+
+**File:** `/app/ui/invoices/buttons.tsx`
+
+```typescript
+'use client';
+
+import { deleteInvoice } from '@/app/lib/actions';
+import { TrashIcon } from '@heroicons/react/24/outline';
+
+export function DeleteInvoice({ id }: { id: string }) {
+  // Use .bind() to pass invoice ID
+  const deleteInvoiceWithId = deleteInvoice.bind(null, id);
+
+  return (
+    <form action={deleteInvoiceWithId}>
+      <button
+        type="submit"
+        className="rounded-md border p-2 hover:bg-gray-100"
+      >
+        <span className="sr-only">Delete</span>
+        <TrashIcon className="w-4" />
+      </button>
+    </form>
+  );
+}
+```
+
+### DELETE: Step 2 - Add Delete Button to Table
+
+**File:** `/app/ui/invoices/table.tsx` (simplified)
+
+```typescript
+import { DeleteInvoice } from '@/app/ui/invoices/buttons';
+
+export default async function InvoicesTable() {
+  const invoices = await fetchFilteredInvoices(query, currentPage);
+
+  return (
+    <table>
+      <tbody>
+        {invoices.map((invoice) => (
+          <tr key={invoice.id}>
+            <td>{invoice.name}</td>
+            <td>${invoice.amount}</td>
+            <td>
+              <DeleteInvoice id={invoice.id} />
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+```
+
+### DELETE Behavior
+
 **Key points:**
-- `action={createInvoice}` connects form to Server Action
-- Form inputs have `name` attributes matching Server Action parameters
-- No JavaScript needed for basic form submission
-- Form fields are validated on server
+- No redirect needed (user stays on page)
+- `revalidatePath()` refreshes the table immediately
+- Invoice disappears from list
+- User sees instant feedback
 
 ---
 
-## Understanding the Data Flow
+## Complete Data Mutation Reference
 
-### Form Submission Flow
+### CREATE Flow
 
 ```
-User fills form
-      ↓
-User clicks "Create Invoice"
-      ↓
-Browser sends FormData to Server Action
-      ↓
-createInvoice(formData) runs on server
-      ↓
-Zod validates: customerId, amount, status
-      ↓
-Transform: Convert amount to cents, create date
-      ↓
-INSERT into database
-      ↓
-revalidatePath() clears cache
-      ↓
-redirect() sends user back to invoices list
-      ↓
-Page refreshes showing new invoice
+Form page (/create)
+  ↓
+User fills form & clicks "Create"
+  ↓
+createInvoice(formData) Server Action
+  ↓
+Validate with Zod
+  ↓
+INSERT INTO invoices
+  ↓
+revalidatePath() + redirect()
+  ↓
+User sees new invoice in list
+```
+
+### UPDATE Flow
+
+```
+Edit page (/[id]/edit)
+  ↓
+Form pre-populated with current data
+  ↓
+User changes fields & clicks "Update"
+  ↓
+updateInvoice(id, formData) Server Action
+  ↓
+Validate with Zod
+  ↓
+UPDATE invoices SET ...
+  ↓
+revalidatePath() + redirect()
+  ↓
+User sees updated invoice in list
+```
+
+### DELETE Flow
+
+```
+Table row with delete button
+  ↓
+User clicks delete icon
+  ↓
+Form submits to deleteInvoice(id)
+  ↓
+DELETE FROM invoices WHERE id = ${id}
+  ↓
+revalidatePath()
+  ↓
+Table refreshes immediately
+  ↓
+Invoice disappears from list
 ```
 
 ---
 
-## Key Concepts Explained
+## Key Concepts
 
 ### 1. Zod Schema Validation
 
-**Purpose:** Validate and transform form data before database insertion
+Validates all input before touching the database:
 
 ```typescript
 const FormSchema = z.object({
-  customerId: z.string({
-    invalid_type_error: 'Please select a customer.',
-  }),
-  amount: z.coerce.number().gt(0, {
-    message: 'Please enter an amount greater than $0.',
-  }),
+  customerId: z.string({ invalid_type_error: 'Required' }),
+  amount: z.coerce.number().gt(0),
   status: z.enum(['pending', 'paid']),
 });
 ```
 
-**What each part does:**
-- `z.string()` - Expects string value
-- `z.coerce.number()` - Converts string to number
-- `.gt(0)` - Must be greater than 0
-- `z.enum()` - Must be one of specified values
-
-**Using `.omit()`:**
-```typescript
-const CreateInvoice = FormSchema.omit({ id: true, date: true });
-```
-Removes `id` (auto-generated) and `date` (created by server)
-
 ### 2. FormData Extraction
 
-HTML form submission sends data as `FormData` object:
+Forms send data as `FormData` object:
 
 ```typescript
 export async function createInvoice(formData: FormData) {
-  // Extract values by input name
-  const customerId = formData.get('customerId');  // From <select name="customerId">
-  const amount = formData.get('amount');          // From <input name="amount">
-  const status = formData.get('status');          // From <input name="status">
+  const customerId = formData.get('customerId');  // From <select>
+  const amount = formData.get('amount');          // From <input>
+  const status = formData.get('status');          // From <radio>
 }
 ```
 
-### 3. Money Precision
+### 3. Money Precision (Cents)
 
-**Always store currency as cents (integers):**
+Always store money as cents (integers), never decimals:
 
 ```typescript
-// ❌ Bad - decimal precision issues
-const amount = 99.99;
-database.insert(amount);
-
-// ✅ Good - integer precision
 const amountInCents = 99.99 * 100;  // 9999 cents
-database.insert(amountInCents);
+// Store 9999 in database, not 99.99
 ```
-
-**Why?** Floating point math is imprecise. Cents are integers and exact.
 
 ### 4. Cache Revalidation
 
-After creating a new record, clear the cache so users see updated data:
+Clear cache after mutations so users see updated data:
 
 ```typescript
 revalidatePath('/dashboard/invoices');
 ```
 
-**What this does:**
-- Clears Next.js cache for that route
-- Next time page loads, data is fetched fresh
-- Users see the newly created invoice
+### 5. Redirect After Create/Update
 
-### 5. Redirect After Creation
-
-Send user back to the list after successful creation:
+Send user back to list after successful mutation:
 
 ```typescript
 redirect('/dashboard/invoices');
 ```
 
-**Benefits:**
-- ✅ Good UX - shows user the action succeeded
-- ✅ Prevents duplicate submissions
-- ✅ User sees new record in list
+### 6. Passing IDs with `.bind()`
 
----
+Keep sensitive IDs off the client:
 
-## Complete Example: Create Invoice
-
-### 1. User navigates to `/dashboard/invoices/create`
-```
-Server renders create page.tsx
-  ↓
-Fetches customers from database
-  ↓
-Renders form with customer options
-```
-
-### 2. User fills form and clicks "Create Invoice"
-```
-Browser submits form to createInvoice Server Action
-  ↓
-Server validates all fields with Zod
-  ↓
-Transform: amount→cents, generate date
-  ↓
-INSERT INTO invoices (...)
-  ↓
-revalidatePath('/dashboard/invoices')
-  ↓
-redirect('/dashboard/invoices')
-```
-
-### 3. Browser navigates to invoices list
-```
-Page refreshes
-  ↓
-New invoice appears in table
+```typescript
+const updateInvoiceWithId = updateInvoice.bind(null, invoice.id);
+<form action={updateInvoiceWithId}>
 ```
 
 ---
 
-## Error Handling
+## Best Practices
 
-### Basic Error Handling
+✅ **Validate all input** - Use Zod for type-safe validation  
+✅ **Store money as cents** - Avoid floating point precision issues  
+✅ **Use `.bind()` for IDs** - Keep sensitive data off client  
+✅ **Revalidate cache** - Keep UI in sync with database  
+✅ **Use parameterized queries** - Prevents SQL injection  
+✅ **Handle errors gracefully** - Log details, show generic message  
+✅ **Pre-populate edit forms** - Show current values with `defaultValue`  
+✅ **Use Server Actions** - No need for API routes  
+
+❌ **Don't** trust client-side validation alone  
+❌ **Don't** store money as decimals  
+❌ **Don't** use hidden inputs for IDs (use `.bind()`)  
+❌ **Don't** forget `revalidatePath()`  
+❌ **Don't** expose database errors to users  
+❌ **Don't** build API routes for simple CRUD  
+
+---
+
+## SQL Injection Prevention
+
+Server Actions use parameterized queries automatically:
+
+```typescript
+// ✅ Safe - SQL injection prevented
+await sql`DELETE FROM invoices WHERE id = ${id}`;
+
+// ❌ Unsafe - Don't do this!
+// const query = `DELETE FROM invoices WHERE id = '${id}'`;
+```
+
+The `sql` template literal automatically escapes all values.
+
+---
+
+## Error Handling Pattern
 
 ```typescript
 export async function createInvoice(formData: FormData) {
   try {
     // Validate
-    const validated = CreateInvoice.parse({
-      customerId: formData.get('customerId'),
-      amount: formData.get('amount'),
-      status: formData.get('status'),
-    });
-
+    const validated = CreateInvoice.parse({...});
+    
     // Insert
-    await sql`
-      INSERT INTO invoices (customer_id, amount, status, date)
-      VALUES (${validated.customerId}, ${validated.amount}, ${validated.status}, ${new Date().toISOString().split('T')[0]})
-    `;
-
+    await sql`INSERT INTO invoices (...)`;
+    
+    // Success
     revalidatePath('/dashboard/invoices');
     redirect('/dashboard/invoices');
   } catch (error) {
-    // Log error for debugging
+    // Log for debugging
     console.error('Failed to create invoice:', error);
     
-    // Show generic error to user (don't expose database details)
+    // Show generic error (don't expose DB details)
     throw new Error('Failed to create invoice.');
   }
 }
@@ -460,61 +725,38 @@ export async function createInvoice(formData: FormData) {
 
 ---
 
-## Best Practices
-
-✅ **Use Zod for validation** - Type-safe, detailed error messages  
-✅ **Store money as cents** - Avoid floating point precision issues  
-✅ **Generate timestamps on server** - Consistent date/time  
-✅ **Use revalidatePath()** - Keep cache in sync  
-✅ **Redirect after success** - Good UX, prevent duplicates  
-✅ **Handle errors gracefully** - Log details, show generic message  
-✅ **Use Server Actions** - No API routes needed  
-
-❌ **Don't** trust client-side validation alone  
-❌ **Don't** store money as decimals  
-❌ **Don't** forget revalidatePath()  
-❌ **Don't** expose database errors to users  
-❌ **Don't** use API routes for simple CRUD  
-
----
-
 ## Quick Reference
 
-| Step | Component | Purpose |
-|------|-----------|---------|
-| **1. Route** | `/create/page.tsx` | Display form with customers |
-| **2. Server Action** | `/lib/actions.ts` | Validate & insert data |
-| **3. Form** | `/ui/create-form.tsx` | User input & submission |
-
-### Server Action Flow
-
-```typescript
-formData → Validate (Zod) → Transform → Insert → Revalidate → Redirect
-```
+| Operation | Action | Redirect | Cache |
+|-----------|--------|----------|-------|
+| **CREATE** | `createInvoice()` | ✅ Yes | ✅ Revalidate |
+| **UPDATE** | `updateInvoice(id)` | ✅ Yes | ✅ Revalidate |
+| **DELETE** | `deleteInvoice(id)` | ❌ No | ✅ Revalidate |
 
 ---
 
 ## Security Benefits
 
-Server Actions provide built-in security:
+Server Actions provide built-in protection:
 
 ✅ **Secrets stay on server** - Database connection never exposed  
-✅ **Encrypted closures** - Cannot be intercepted or replayed  
+✅ **Encrypted closures** - IDs passed via `.bind()` are encrypted  
 ✅ **Input validation** - Zod catches malformed data  
 ✅ **Type-safe** - TypeScript prevents wrong types  
-✅ **Automatic CSRF protection** - Next.js handles CSRF tokens  
-✅ **Works without JavaScript** - Progressive enhancement  
+✅ **Parameterized queries** - SQL injection prevention  
+✅ **Automatic CSRF protection** - Next.js handles tokens  
+✅ **Progressive enhancement** - Works without JavaScript  
 
 ---
 
 ## Next Steps
 
 You now understand:
-- **Server Actions** - Run code securely on server
-- **Form + Server Action** - Simple, no API routes needed
-- **Zod validation** - Type-safe data validation
-- **Data transformation** - Convert formats before database
-- **Cache & redirect** - Update UI after creation
-- **Security** - Why Server Actions are safe
+- **CREATE** - Adding new records with Server Actions
+- **UPDATE** - Modifying existing records with pre-populated forms
+- **DELETE** - Removing records from the database
+- **Data flows** - How forms connect to Server Actions
+- **Security** - Why Server Actions are safer than API routes
+- **Cache management** - Keeping UI in sync with database
 
-Ready for UPDATE and DELETE operations in the next sections! 🚀
+You now have complete CRUD (Create, Read, Update, Delete) operations! 🚀
